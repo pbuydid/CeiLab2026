@@ -1,0 +1,164 @@
+<?php
+require_once __DIR__ . '/../Persistencia/connect.php';
+
+class ClsSala {
+
+    //Registro una sala
+    public function registrarSala($idSalon, $observaciones, $disponibilidad) {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+
+        $idSalon = mysqli_real_escape_string($link, trim($idSalon));
+        $observaciones = mysqli_real_escape_string($link, trim($observaciones));
+        $disponibilidad = mysqli_real_escape_string($link, trim($disponibilidad));
+
+        $sqlCheck = "SELECT IDSalon FROM sala_ceilab WHERE IDSalon = '$idSalon'";
+        $resultadoCheck = mysqli_query($link, $sqlCheck);
+        if ($resultadoCheck && mysqli_num_rows($resultadoCheck) > 0) {
+            return false; //Ya existe, retorna falso 
+        }
+
+        //Inserción
+        try {
+            $sql = "INSERT INTO sala_ceilab (IDSalon, Observaciones, Disponibilidad) VALUES ('$idSalon', '$observaciones', '$disponibilidad')";
+            return mysqli_query($link, $sql);
+        } catch (mysqli_sql_exception $e) {
+            return false;
+        }
+    }
+    //Listo salas
+    public function listarSalas() {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+
+        $sql = "SELECT IDSalon, Observaciones, Disponibilidad FROM sala_ceilab";
+        $resultado = mysqli_query($link, $sql);
+        
+        $salas = [];
+        if ($resultado) {
+            while ($row = mysqli_fetch_assoc($resultado)) {
+                $salas[] = $row;
+            }
+        }
+        return $salas;
+    }
+    //Elimino una sala
+    public function eliminarSala($idSalon) {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+
+        $idSalon = mysqli_real_escape_string($link, $idSalon);
+
+        //Verifica si hay equipos asociados a esta sala
+        $sqlCheck = "SELECT COUNT(*) as total FROM equipo WHERE IDSala_ceilab = '$idSalon'";
+        $resCheck = mysqli_query($link, $sqlCheck);
+        if ($resCheck) {
+            $row = mysqli_fetch_assoc($resCheck);
+            if ($row['total'] > 0) {
+                return "foreign_key"; //Tiene equipos asociados
+            }
+        }
+
+        //Verifica si hay reservas asociadas a esta sala
+        $sqlCheckReservas = "SELECT COUNT(*) as total FROM reservas WHERE IDSalon = '$idSalon'"; 
+        $resCheckReservas = mysqli_query($link, $sqlCheckReservas);
+        if ($resCheckReservas) {
+            $rowRes = mysqli_fetch_assoc($resCheckReservas);
+            if ($rowRes['total'] > 0) {
+                return "tiene_reservas"; //Tiene reservas asociadas
+            }
+        }
+
+        //Eliminación en la BD
+        try {
+            $sql = "DELETE FROM sala_ceilab WHERE IDSalon = '$idSalon'";
+            return mysqli_query($link, $sql);
+        } catch (mysqli_sql_exception $e) {
+            return false;
+        }
+    }
+    //Busco la sala por ID
+    public function obtenerSalaPorId($idSalon) {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+
+        $idSalon = mysqli_real_escape_string($link, $idSalon);
+        $sql = "SELECT IDSalon, Observaciones, Disponibilidad FROM sala_ceilab WHERE IDSalon = '$idSalon'";
+        $resultado = mysqli_query($link, $sql);
+
+        if ($resultado && $row = mysqli_fetch_assoc($resultado)) {
+            return $row;
+        }
+        return null;
+    }
+    //Modifico una sala
+    public function modificarSala($idOriginal, $nuevoId, $observaciones, $disponibilidad) {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+
+        $idOriginal = mysqli_real_escape_string($link, trim($idOriginal));
+        $nuevoId = mysqli_real_escape_string($link, trim($nuevoId));
+        $observaciones = mysqli_real_escape_string($link, trim($observaciones));
+        $disponibilidad = mysqli_real_escape_string($link, trim($disponibilidad));
+
+        if ($idOriginal !== $nuevoId) {
+            $sqlCheck = "SELECT IDSalon FROM sala_ceilab WHERE IDSalon = '$nuevoId'";
+            $resultadoCheck = mysqli_query($link, $sqlCheck);
+            if ($resultadoCheck && mysqli_num_rows($resultadoCheck) > 0) {
+                return false; //Por si el nuevo ID ya está en uso
+            }
+        }
+
+        try {
+            if ($idOriginal !== $nuevoId) {
+                $sql = "UPDATE sala_ceilab SET IDSalon = '$nuevoId', Observaciones = '$observaciones', Disponibilidad = '$disponibilidad' WHERE IDSalon = '$idOriginal'";
+            } else {
+                $sql = "UPDATE sala_ceilab SET Observaciones = '$observaciones', Disponibilidad = '$disponibilidad' WHERE IDSalon = '$idOriginal'";
+            }
+
+            return mysqli_query($link, $sql);
+        } catch (mysqli_sql_exception $e) {
+            return false;
+        }
+    } 
+    //listo la sala y filtro segun disp. y ID
+    public function listarSalasFiltradas($idSalon = '', $disponibilidad = '') {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+
+        $sql = "SELECT IDSalon, Observaciones, Disponibilidad FROM sala_ceilab WHERE 1=1";
+        
+        if (!empty($idSalon)) {
+            $idSalon = mysqli_real_escape_string($link, trim($idSalon));
+            $sql .= " AND IDSalon LIKE '%$idSalon%'";
+        }
+        
+        if ($disponibilidad !== '') {
+            $disponibilidad = mysqli_real_escape_string($link, trim($disponibilidad));
+            $sql .= " AND Disponibilidad = '$disponibilidad'";
+        }
+
+        $resultado = mysqli_query($link, $sql);
+        $salas = [];
+        if ($resultado) {
+            while ($row = mysqli_fetch_assoc($resultado)) {
+                $salas[] = $row;
+            }
+        }
+        return $salas;
+    }
+    //Control para que no deje eliminar sala si hay una reserva asociada 
+    public function tieneReservas($idSala) {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+        $idSala = (int)$idSala;
+
+        //Consulta si existe al menos una reserva vinculada a esta sala
+        $sql = "SELECT COUNT(*) as total FROM reserva WHERE IDSala = $idSala";
+        $resultado = mysqli_query($link, $sql);
+        $row = mysqli_fetch_assoc($resultado);
+
+        return ($row['total'] > 0); //Retorna true si tiene reservas
+    }
+}    
+?>

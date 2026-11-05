@@ -1,0 +1,524 @@
+<?php
+require_once __DIR__ . '/../Persistencia/connect.php';
+
+class ClsOperaciones {
+    
+    //Obtengo la lista de usuarios activos para el selector de préstamos directos
+    public function obtenerUsuariosActivos() {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+        
+        $sql = "SELECT u.IDUsuario, u.Nombre, COALESCE(u.Faltas, 0) AS Faltas,
+                       GROUP_CONCAT(ur.ROL SEPARATOR ', ') AS Roles
+                FROM usuario u 
+                LEFT JOIN rol ur ON u.IDUsuario = ur.IDUsuario
+                WHERE u.activo = 1 
+                GROUP BY u.IDUsuario, u.Nombre, u.Faltas
+                ORDER BY u.Nombre ASC";
+                
+        $resultado = mysqli_query($link, $sql);
+        $usuarios = [];
+        
+        if ($resultado) {
+            while ($row = mysqli_fetch_assoc($resultado)) {
+                $usuarios[] = $row;
+            }
+        }
+        return $usuarios;
+    }
+    //Convierto una reserva existente en préstamo (accion = 1) 
+    public function convertirReservaEnPrestamo($idReserva, $idUsuarioOperador) {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+        $idReserva = (int)$idReserva;
+        $fechaHoy = date('Y-m-d');
+
+        $sqlReserva = "SELECT IDUsuario, HoraInicio, HoraFin FROM reservas WHERE IDReservas = $idReserva AND Fecha = '$fechaHoy' AND activo = 1";
+        $resR = mysqli_query($link, $sqlReserva);
+        
+        if (!$resR || mysqli_num_rows($resR) === 0) {
+            return $this->generarModalRespuesta("Error", "La reserva no existe, no corresponde al día de hoy o ya fue procesada.", "bg-danger text-white", "btn-danger");
+        }
+
+        $datosReserva = mysqli_fetch_assoc($resR);
+        $idUsuarioCliente = $datosReserva['IDUsuario'];
+        $horaInicioRes = $datosReserva['HoraInicio'];
+        $horaFinRes = $datosReserva['HoraFin'];
+
+        $sqlEquipos = "SELECT IDEquipo FROM tiene_equipos WHERE IDReservas = $idReserva";
+        $resEq = mysqli_query($link, $sqlEquipos);
+        
+        if (!$resEq || mysqli_num_rows($resEq) === 0) {
+            return $this->generarModalRespuesta("Atención", "La reserva no tiene equipos asociados.", "bg-warning text-dark", "btn-warning");
+        }
+
+        while ($eqCheck = mysqli_fetch_assoc($resEq)) {
+            if ($this->estaEquipoPrestado($eqCheck['IDEquipo'])) {
+                return $this->generarModalRespuesta("Equipo Ocupado", "El equipo con ID " . $eqCheck['IDEquipo'] . " ya se encuentra prestado actualmente.", "bg-danger text-white", "btn-danger");
+            }
+        }
+
+        $resEq = mysqli_query($link, $sqlEquipos);
+
+        mysqli_begin_transaction($link);
+
+        try {
+            //Hago el préstamo
+            while ($eq = mysqli_fetch_assoc($resEq)) {
+                $idEquipo = $eq['IDEquipo'];
+                $sqlOp = "INSERT INTO operaciones (Accion, Fecha, HoraInicio, HoraFin, Observaciones, IDUsuario, IDEquipo) 
+                          VALUES (1, '$fechaHoy', '$horaInicioRes', '$horaFinRes', 'Préstamo generado desde Reserva #$idReserva', $idUsuarioCliente, '$idEquipo')";
+                if (!mysqli_query($link, $sqlOp)) {
+                    throw new Exception("Error al registrar el préstamo del equipo $idEquipo.");
+                }
+            }
+            //Doy la baja lógica a la reserva
+            $sqlBajaReserva = "UPDATE reservas SET activo = 0 WHERE IDReservas = $idReserva";
+            if (!mysqli_query($link, $sqlBajaReserva)) {
+                throw new Exception("Error al dar de baja la reserva.");
+            }
+
+            mysqli_commit($link);
+            return $this->generarModalRespuesta("¡Préstamo Registrado!", "La reserva fue convertida en préstamo activo exitosamente.", "bg-success text-white", "btn-success", true);
+
+        } catch (Exception $e) {
+            mysqli_rollback($link);
+            return $this->generarModalRespuesta("Error", $e->getMessage(), "bg-danger text-white", "btn-danger");
+        }
+    }
+    //Registro un préstamo directo (sin reserva previa) guardando en operaciones
+    public function registrarPrestamoDirecto($idUsuarioCliente, $horaInicio, $horaFin, $arrayEquipos) {
+        if (empty($arrayEquipos) || !is_array($arrayEquipos)) {
+            return $this->generarModalRespuesta("Atención", "Debe seleccionar al menos un equipo para realizar el préstamo.", "bg-warning text-dark", "btn-warning");
+        }
+
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+        $fechaHoy = date('Y-m-d');
+        $idUsuarioCliente = (int)$idUsuarioCliente;
+        $horaInicio = mysqli_real_escape_string($link, trim($horaInicio));
+        $horaFin = mysqli_real_escape_string($link, trim($horaFin));
+
+        if ($horaInicio >= $horaFin) {
+            return $this->generarModalRespuesta("Error de Horario", "El horario de inicio debe ser menor al horario de fin.", "bg-danger text-white", "btn-danger");
+        }
+
+        foreach ($arrayEquipos as $idEquipo) {
+            if ($this->estaEquipoPrestado($idEquipo)) {
+                return $this->generarModalRespuesta("Equipo Ocupado", "El equipo con ID $idEquipo ya se encuentra prestado actualmente.", "bg-danger text-white", "btn-danger");
+            }
+        }
+
+        mysqli_begin_transaction($link);
+
+        try {
+            $primerIdOperacion = null;
+            $detallesEquipos = [];
+
+            //Inserto directamente en operaciones con su hora de inicio y fin
+            foreach ($arrayEquipos as $idEquipo) {
+                $idEquipoEscaped = mysqli_real_escape_string($link, trim($idEquipo));
+
+                $sqlOp = "INSERT INTO operaciones (Accion, Fecha, HoraInicio, HoraFin, Observaciones, IDUsuario, IDEquipo) 
+                          VALUES (1, '$fechaHoy', '$horaInicio', '$horaFin', 'Préstamo directo sin reserva previa', $idUsuarioCliente, '$idEquipoEscaped')";
+                
+                if (!mysqli_query($link, $sqlOp)) {
+                    throw new Exception("Error al registrar la operación de préstamo para el equipo $idEquipoEscaped.");
+                }
+
+                //Captura el ID de la primera operacion registrada como referencia principal
+                if ($primerIdOperacion === null) {
+                    $primerIdOperacion = mysqli_insert_id($link);
+                }
+
+                //Consulta el tipo del equipo para armar el listado visual del modal
+                $resEq = mysqli_query($link, "SELECT Tipo, IDEquipo FROM equipo WHERE IDEquipo = '$idEquipoEscaped'");
+                if ($rowEq = mysqli_fetch_assoc($resEq)) {
+                    $detallesEquipos[] = $rowEq;
+                } else {
+                    $detallesEquipos[] = ['Tipo' => 'Equipo', 'IDEquipo' => $idEquipoEscaped];
+                }
+            }
+
+            mysqli_commit($link);
+
+            //Crea el listado de los equipos para el modal
+            $htmlDetalleEquipos = '
+            <div class="text-center mb-3">
+                <span class="badge bg-success bg-opacity-25 text-success fs-6 px-3 py-2 rounded-pill fw-bold">
+                    💻 Referencia Préstamo ID: #' . $primerIdOperacion . '
+                </span>
+            </div>
+            <p class="text-dark fw-semibold mb-2">Equipos entregados en esta operación:</p>
+            <ul class="list-group list-group-flush small border rounded-3 overflow-hidden mb-3 text-start">';
+            
+            foreach ($detallesEquipos as $eq) {
+                $htmlDetalleEquipos .= '<li class="list-group-item d-flex justify-content-between align-items-center">
+                    <span class="fw-bold text-primary">' . htmlspecialchars($eq['Tipo']) . '</span>
+                    <span class="badge bg-secondary">ID: ' . htmlspecialchars($eq['IDEquipo']) . '</span>
+                </li>';
+            }
+            $htmlDetalleEquipos .= '</ul>';
+
+            //Retorna el HTML del modal de éxito 
+            return '
+            <div class="modal fade" id="modalRespuesta" tabindex="-1" aria-hidden="true">
+                <div class="modal-dialog modal-dialog-centered">
+                    <div class="modal-content shadow border-0">
+                        <div class="modal-header bg-success text-white">
+                            <h5 class="modal-title fw-bold">✅ ¡Préstamo Directo Exitoso!</h5>
+                            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body py-4">
+                            ' . $htmlDetalleEquipos . '
+                        </div>
+                        <div class="modal-footer justify-content-center bg-light">
+                            <button type="button" class="btn btn-success px-4 fw-bold shadow-sm" data-bs-dismiss="modal" onclick="location.reload();">
+                                Aceptar
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>';
+
+        } catch (Exception $e) {
+            mysqli_rollback($link);
+            return $this->generarModalRespuesta("Error", $e->getMessage(), "bg-danger text-white", "btn-danger");
+        }
+    }
+    //Obtengo reservas del día actual
+    public function obtenerReservasDelDia($fecha) {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+        $fecha = mysqli_real_escape_string($link, $fecha);
+
+        //Consulta que trae reservas que tengan equipos asociados (si no hago esto termino viendo las reservas de salas)
+        $sql = "
+            SELECT r.IDReservas, r.Fecha, r.HoraInicio, r.HoraFin, 
+                   u.IDUsuario, u.Nombre AS nombre_usuario, u.email, COALESCE(u.Faltas, 0) AS Faltas
+            FROM reservas r
+            JOIN usuario u ON r.IDUsuario = u.IDUsuario
+            WHERE r.Fecha = '$fecha' 
+              AND r.activo = 1
+              AND EXISTS (
+                  SELECT 1 FROM tiene_equipos te 
+                  JOIN equipo e ON te.IDEquipo = e.IDEquipo 
+                  WHERE te.IDReservas = r.IDReservas 
+                    AND e.Tipo != 'Sala'
+              )
+            ORDER BY r.HoraInicio ASC;
+        ";
+
+        $resultado = mysqli_query($link, $sql);
+        $reservas = [];
+
+        if ($resultado) {
+            while ($row = mysqli_fetch_assoc($resultado)) {
+                $idReserva = $row['IDReservas'];
+                //Traigo equipos de la reserva
+                $sqlEq = "SELECT te.IDEquipo, e.Tipo FROM tiene_equipos te JOIN equipo e ON te.IDEquipo = e.IDEquipo WHERE te.IDReservas = $idReserva";
+                $resEq = mysqli_query($link, $sqlEq);
+                $equipos = [];
+                if ($resEq) {
+                    while ($eqRow = mysqli_fetch_assoc($resEq)) {
+                        $equipos[] = $eqRow;
+                    }
+                }
+                $row['equipos'] = $equipos;
+                $reservas[] = $row;
+            }
+        }
+        return $reservas;
+    }
+    //Generador de modales estandarizados
+    private function generarModalRespuesta($titulo, $mensaje, $claseHeader, $claseBoton, $recargar = false) {
+        $onclick = $recargar ? 'onclick="location.reload();"' : '';
+        return '
+        <div class="modal fade" id="modalRespuesta" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content shadow border-0">
+                    <div class="modal-header ' . $claseHeader . '">
+                        <h5 class="modal-title fw-bold">' . $titulo . '</h5>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body text-center py-4">
+                        <p class="fs-5 text-dark mb-0">' . $mensaje . '</p>
+                    </div>
+                    <div class="modal-footer justify-content-center">
+                        <button type="button" class="btn ' . $claseBoton . ' px-4 fw-bold" ' . $onclick . ' data-bs-dismiss="modal">Entendido</button>
+                    </div>
+                </div>
+            </div>
+        </div>';
+    }
+    //Verifica si un equipo se encuentra actualmente prestado (última acción = 1 sin devolución posterior)
+    public function estaEquipoPrestado($idEquipo) {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+        $idEquipoEscaped = mysqli_real_escape_string($link, trim($idEquipo));
+
+        $sql = "SELECT Accion FROM operaciones WHERE IDEquipo = '$idEquipoEscaped' ORDER BY IDOperaciones DESC LIMIT 1";
+        $resultado = mysqli_query($link, $sql);
+
+        if ($resultado && mysqli_num_rows($resultado) > 0) {
+            $row = mysqli_fetch_assoc($resultado);
+            //Si la última operación es Préstamo (1), está prestado actualmente
+            if ((int)$row['Accion'] === 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+    //Obtengo la lista de equipos que se encuentran actualmente prestados con su respectivo usuario responsable
+    public function obtenerEquiposPrestadosActualmente() {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+
+        //Busca los equipos que su ultima operación registrada sea un Préstamo (Accion = 1)
+        $sql = "
+            SELECT o.IDOperaciones, o.IDEquipo, e.Tipo, e.Estado as EstadoEquipo, 
+                   o.IDUsuario, u.Nombre AS NombreUsuario, u.email, o.Fecha, o.HoraInicio, o.HoraFin
+            FROM operaciones o
+            JOIN equipo e ON o.IDEquipo = e.IDEquipo
+            JOIN usuario u ON o.IDUsuario = u.IDUsuario
+            WHERE o.IDOperaciones = (
+                SELECT MAX(o2.IDOperaciones) 
+                FROM operaciones o2 
+                WHERE o2.IDEquipo = o.IDEquipo
+            )
+            AND o.Accion = 1
+            ORDER BY o.Fecha DESC, o.HoraInicio DESC;
+        ";
+
+        $resultado = mysqli_query($link, $sql);
+        $prestados = [];
+
+        if ($resultado) {
+            while ($row = mysqli_fetch_assoc($resultado)) {
+                $prestados[] = $row;
+            }
+        }
+        return $prestados;
+    }
+    //Registro la devolución de un equipo (Accion = 2) actualizando estado, disponibilidad y observaciones del equipo
+    public function registrarDevolucion($idEquipo, $estadoDevolucion, $nuevoEstadoEquipo, $observacionesDevolucion, $idUsuarioResponsable, $aplicarFalta = false) {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+        
+        $idEquipo = mysqli_real_escape_string($link, trim($idEquipo));
+        $estadoDevolucion = mysqli_real_escape_string($link, trim($estadoDevolucion)); 
+        $nuevoEstadoEquipo = mysqli_real_escape_string($link, trim($nuevoEstadoEquipo)); 
+        $observacionesDevolucion = mysqli_real_escape_string($link, trim($observacionesDevolucion));
+        $idUsuarioResponsable = (int)$idUsuarioResponsable;
+        $aplicarFalta = (bool)$aplicarFalta;
+        $fechaHoy = date('Y-m-d');
+        $horaActual = date('H:i:s');
+
+        //Valida que el equipo esté prestado
+        if (!$this->estaEquipoPrestado($idEquipo)) {
+            return $this->generarModalRespuesta("Atención", "El equipo seleccionado no figura como prestado actualmente.", "bg-warning text-dark", "btn-warning");
+        }
+
+        //Si está roto, no puede quedar en estado Disponible
+        if ($estadoDevolucion === 'roto' && $nuevoEstadoEquipo === 'Disponible') {
+            return $this->generarModalRespuesta("Error de Validación", "Un equipo reportado como roto o dañado no puede quedar en estado Disponible.", "bg-danger text-white", "btn-danger");
+        }
+
+        mysqli_begin_transaction($link);
+
+        try {
+            //1. Registra la operación de Devolución (Accion = 2)
+            $obsFinal = "Devolución registrada. Condición: " . ucfirst($estadoDevolucion) . ". " . $observacionesDevolucion;
+            $sqlOp = "INSERT INTO operaciones (Accion, Fecha, HoraInicio, HoraFin, Observaciones, IDUsuario, IDEquipo) 
+                      VALUES (2, '$fechaHoy', '$horaActual', '$horaActual', '$obsFinal', $idUsuarioResponsable, '$idEquipo')";
+            
+            if (!mysqli_query($link, $sqlOp)) {
+                throw new Exception("Error al registrar la operación de devolución.");
+            }
+
+            //2. Actualizo el estado, la disponibilidad Y las observaciones en la tabla equipo
+            $disponibilidadEquipo = ($nuevoEstadoEquipo === 'Disponible') ? 1 : 0;
+
+            //Si el usuario no escribió observaciones, podemos mantener o limpiar, pero aseguramos registrar el texto ingresado
+            $obsEquipoEscaped = !empty($observacionesDevolucion) ? $observacionesDevolucion : "Devolución en estado " . $estadoDevolucion;
+            
+            $sqlEquipo = "UPDATE equipo 
+                          SET Estado = '$nuevoEstadoEquipo', 
+                              Disponibilidad = $disponibilidadEquipo, 
+                              Observaciones = '$obsEquipoEscaped' 
+                          WHERE IDEquipo = '$idEquipo'";
+            
+            if (!mysqli_query($link, $sqlEquipo)) {
+                throw new Exception("Error al actualizar el estado físico y observaciones del equipo.");
+            }
+
+            //3. Registro falta si corresponde (Usando COALESCE para evitar problemas con NULL)
+            $textoFalta = "";
+            if ($estadoDevolucion === 'roto' && $aplicarFalta) {
+                $sqlFalta = "UPDATE usuario SET Faltas = COALESCE(Faltas, 0) + 1 WHERE IDUsuario = $idUsuarioResponsable";
+                if (!mysqli_query($link, $sqlFalta)) {
+                    throw new Exception("Error al registrar la falta en el historial del usuario.");
+                }
+                $textoFalta = " y se aplicó 1 falta al historial del usuario.";
+            } elseif ($estadoDevolucion === 'roto') {
+                $textoFalta = " (sin sanción de falta por decisión del operador).";
+            }
+
+            mysqli_commit($link);
+            
+            $mensajeExito = "Devolución registrada exitosamente. El equipo pasó a estado '$nuevoEstadoEquipo'" . $textoFalta;
+            return $this->generarModalRespuesta("¡Devolución Exitosa!", $mensajeExito, "bg-success text-white", "btn-success", true);
+
+        } catch (Exception $e) {
+            mysqli_rollback($link);
+            return $this->generarModalRespuesta("Error", $e->getMessage(), "bg-danger text-white", "btn-danger");
+        }
+    }
+    //Registro que un equipo no fue devuelto, se pasa a No Disponible y aplica falta obligatoria
+    public function marcarEquipoNoDevuelto($idEquipo, $idUsuarioResponsable, $observaciones = '') {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+        
+        $idEquipo = mysqli_real_escape_string($link, trim($idEquipo));
+        $idUsuarioResponsable = (int)$idUsuarioResponsable;
+        $observaciones = mysqli_real_escape_string($link, trim($observaciones));
+        $fechaHoy = date('Y-m-d');
+        $horaActual = date('H:i:s');
+
+        //Valida que el equipo esté prestado
+        if (!$this->estaEquipoPrestado($idEquipo)) {
+            return $this->generarModalRespuesta("Atención", "El equipo seleccionado no figura como prestado actualmente.", "bg-warning text-dark", "btn-warning");
+        }
+
+        mysqli_begin_transaction($link);
+
+        try {
+            //1. Registra la operación de cierre por falta de devolución (Accion = 2)
+            $obsFinal = "Incidencia: Equipo no devuelto al cierre del día. " . ($observaciones ? $observaciones : "Sin observaciones.");
+            $sqlOp = "INSERT INTO operaciones (Accion, Fecha, HoraInicio, HoraFin, Observaciones, IDUsuario, IDEquipo) 
+                      VALUES (2, '$fechaHoy', '$horaActual', '$horaActual', '$obsFinal', $idUsuarioResponsable, '$idEquipo')";
+            
+            if (!mysqli_query($link, $sqlOp)) {
+                throw new Exception("Error al registrar la operación.");
+            }
+
+            //2. Actualiza el estado del equipo a NoDisponible y Disponibilidad = 0
+            $sqlEquipo = "UPDATE equipo 
+                          SET Estado = 'NoDisponible', 
+                              Disponibilidad = 0, 
+                              Observaciones = 'No devuelto el $fechaHoy. $observaciones' 
+                          WHERE IDEquipo = '$idEquipo'";
+            
+            if (!mysqli_query($link, $sqlEquipo)) {
+                throw new Exception("Error al actualizar el estado físico del equipo.");
+            }
+
+            //3. Aplico falta de +1 al usuario (usando COALESCE por si traigo un valor null, que se vea como 0)
+            $sqlFalta = "UPDATE usuario SET Faltas = COALESCE(Faltas, 0) + 1 WHERE IDUsuario = $idUsuarioResponsable";
+            if (!mysqli_query($link, $sqlFalta)) {
+                throw new Exception("Error al registrar la falta en el historial del usuario.");
+            }
+
+            mysqli_commit($link);
+            
+            return $this->generarModalRespuesta("Registro Actualizado", "El equipo fue marcado como no devuelto, su estado pasó a 'No Disponible' y se aplicó 1 falta al usuario responsable.", "bg-danger text-white", "btn-danger", true);
+
+        } catch (Exception $e) {
+            mysqli_rollback($link);
+            return $this->generarModalRespuesta("Error", $e->getMessage(), "bg-danger text-white", "btn-danger");
+        }
+    }
+    //Cancelo una reserva (baja lógica)
+    public function cancelarReservaPorDot($idReserva) {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+        $idReserva = (int)$idReserva;
+
+        $sql = "UPDATE reservas SET activo = 0 WHERE IDReservas = $idReserva";
+        if (mysqli_query($link, $sql)) {
+            return $this->generarModalRespuesta("Reserva Cancelada", "La reserva ha sido cancelada exitosamente por el DOT.", "bg-danger text-white", "btn-danger", true);
+        } else {
+            return $this->generarModalRespuesta("Error", "No se pudo cancelar la reserva en este momento.", "bg-danger text-white", "btn-danger");
+        }
+    }
+    public function obtenerHistorialReservas() {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+
+        //Consulta para traer todas las reservas del sistema con su usuario responsable
+        $sql = "
+            SELECT r.IDReservas, r.Fecha, r.HoraInicio, r.HoraFin, r.IDSalon, r.cantHoras, r.activo,
+                   u.IDUsuario, u.Nombre AS nombre_usuario, u.email
+            FROM reservas r
+            JOIN usuario u ON r.IDUsuario = u.IDUsuario
+            ORDER BY IDReservas ASC, r.HoraInicio ASC;
+        ";
+
+        $resultado = mysqli_query($link, $sql);
+        $historial = [];
+
+        if ($resultado) {
+            while ($row = mysqli_fetch_assoc($resultado)) {
+                $idReserva = $row['IDReservas'];
+                
+                //Obtengo los equipos vinculados a cada reserva
+                $sqlEq = "SELECT te.IDEquipo, e.Tipo FROM tiene_equipos te JOIN equipo e ON te.IDEquipo = e.IDEquipo WHERE te.IDReservas = $idReserva";
+                $resEq = mysqli_query($link, $sqlEq);
+                $equipos = [];
+                
+                if ($resEq) {
+                    while ($eqRow = mysqli_fetch_assoc($resEq)) {
+                        $equipos[] = $eqRow;
+                    }
+                }
+                
+                $row['equipos'] = $equipos;
+                $historial[] = $row;
+            }
+        }
+        return $historial;
+    }
+    //Método para listar el historial de prestamos y devoluciones
+    public function obtenerHistorialPrestamoDev($filtroCedula = '', $filtroAccion = '', $filtroIDUsuario = '') {
+        $objConexion = new Conexion();
+        $link = $objConexion->conectar();
+
+        //Consulta que trae historial de prestamos y dev, trae los usuarios resp. de las operaciones  
+        $sql = "SELECT o.IDOperaciones, o.Accion, o.Fecha, o.HoraInicio, o.HoraFin, o.Observaciones, 
+                       u.nombre AS NombreUsuario, u.cedula AS CedulaUsuario, o.IDEquipo,
+                       e.Disponibilidad AS EquipoDisponibilidad, e.Observaciones AS ObsEquipo,
+                       ultimo_mov.MaxID
+                FROM operaciones o 
+                INNER JOIN usuario u ON o.IDUsuario = u.IDUsuario 
+                LEFT JOIN equipo e ON o.IDEquipo = e.IDEquipo 
+                LEFT JOIN (
+                    SELECT IDEquipo, MAX(IDOperaciones) as MaxID 
+                    FROM operaciones 
+                    GROUP BY IDEquipo
+                ) ultimo_mov ON o.IDEquipo = ultimo_mov.IDEquipo
+                WHERE 1=1";
+
+        //Filtra por cedula del usuario
+        if (!empty($filtroCedula)) {
+            $cedulaEscaped = mysqli_real_escape_string($link, $filtroCedula);
+            $sql .= " AND u.cedula = '$cedulaEscaped'";
+        }
+
+        //Filtra por tipo de accion (presta o dev)
+        if (!empty($filtroAccion)) {
+            $accionEscaped = mysqli_real_escape_string($link, $filtroAccion);
+            $sql .= " AND o.Accion = '$accionEscaped'";
+        }
+
+        //Filtra por ID de usuario así puedo usar la funcion para obtener los registros de el usuario logeado
+        if (!empty($filtroIDUsuario)) {
+            $idUsuarioEscaped = mysqli_real_escape_string($link, $filtroIDUsuario);
+            $sql .= " AND o.IDUsuario = '$idUsuarioEscaped'";
+        }
+
+        $sql .= " ORDER BY o.IDOperaciones ASC";
+
+        return mysqli_query($link, $sql);
+    }
+}
+?>

@@ -1,0 +1,144 @@
+@media print {
+    /* Fuerza al navegador a imprimir con colores, fondos y opacidades exactas */
+    *, *:before, *:after {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    /* Oculta elementos de navegación y botones */
+    .print-hidden, 
+    .navbar, 
+    nav,
+    header,
+    footer,
+    .btn, 
+    button,
+    .no-print {
+        display: none !important;
+        visibility: hidden !important;
+    }
+
+    /* Configuración general de la página */
+    body {
+        background-color: #ffffff !important;
+        color: #212529 !important;
+        font-size: 10pt;
+        margin: 0 !important;
+        padding: 15px !important;
+    }
+
+    .container, .container-fluid {
+        max-width: 100% !important;
+        width: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+
+    /* Tarjetas limpias pero con su estructura base */
+    .card {
+        border: none !important;
+        box-shadow: none !important;
+        padding: 0 !important;
+        background: transparent !important;
+    }
+
+    .table-responsive {
+        overflow: visible !important;
+    }
+
+    /* Cuadricula con bordes visibles */
+    table.table {
+        width: 100% !important;
+        border-collapse: separate !important;
+        border-spacing: 0 !important;
+        border-top: 1px solid #dee2e6 !important;
+        border-left: 1px solid #dee2e6 !important;
+        margin-top: 15px !important;
+    }
+
+    table.table th, 
+    table.table td {
+        border-right: 1px solid #dee2e6 !important;
+        border-bottom: 1px solid #dee2e6 !important;
+        border-top: none !important;
+        border-left: none !important;
+        padding: 8px 10px !important;
+        font-size: 9.5pt;
+        vertical-align: middle !important;
+    }
+
+    /* Cabecera de la tabla con el estilo light */
+    table.table thead th {
+        background-color: #f8f9fa !important;
+        color: #495057 !important;
+        font-weight: bold !important;
+        text-transform: uppercase;
+        font-size: 8.5pt;
+    }
+
+    td .d-flex {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        gap: 3px !important;
+    }
+
+    .badge {
+        padding: 4px 8px !important;
+        font-size: 8pt !important;
+        font-weight: 600 !important;
+    }
+    /* Fuerzo a que el doc tenga el fondo blanco */
+    html, body, .bg-light, .hero-section {
+        background: #ffffff !important;
+        background-color: #ffffff !important;
+    }
+    
+    /* CSS para las métricas de stock de equipos */
+    .print-metrics-row {
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        gap: 8px !important;
+        margin-bottom: 12px !important;
+    }
+    .print-metric-col {
+        flex: 1 !important;
+        width: auto !important;
+    }
+    .print-metric-card {
+        border: 1px solid #ced4da !important;
+        box-shadow: none !important;
+        background-color: #ffffff !important;
+        padding: 6px 8px !important;
+        border-radius: 4px !important;
+    }
+    /* Forzar al contenido interno para que se alinee y no se separe */
+    .print-metric-card .d-flex {
+        display: flex !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+    }
+
+    /* Reduce el tamaño de las etiquetas superiores */
+    .print-metric-card span {
+        font-size: 6.5pt !important;
+        line-height: 1 !important;
+    }
+
+    /* Achica los números de las métricas */
+    .print-metric-card h3 {
+        font-size: 11pt !important;
+        margin-top: 2px !important;
+        margin-bottom: 0 !important;
+        line-height: 1.1 !important;
+    }
+
+    /* Ajusta el tamaño del icono y  lo muestra compacto al lado */
+    .print-metric-card .fs-2 {
+        font-size: 14pt !important;
+        display: block !important;
+        visibility: visible !important;
+        margin-left: 4px !important;
+        opacity: 0.7 !important;
+    }
+}
